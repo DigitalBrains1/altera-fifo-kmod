@@ -29,6 +29,7 @@
 #define FIFO_IENABLE_UDF  (0x20)
 #define FIFO_IENABLE_ALL  (0x3F)
 
+static const char altera_version[] = "0.1";
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("QBayLogic B.V.");
 MODULE_DESCRIPTION("Platform driver for an Altera Avalon FIFO.");
@@ -43,9 +44,11 @@ static const struct of_device_id altera_of_ids[] = {
 	{ }
 };
 
+MODULE_DEVICE_TABLE(of, altera_of_ids);
+
 static struct platform_driver altera_driver = {
 	.driver                 = {
-		.name           = "altera-fifo",
+		.name           = "altera_fifo",
 		.owner          = THIS_MODULE,
 		.of_match_table = altera_of_ids,
 	},
@@ -53,11 +56,43 @@ static struct platform_driver altera_driver = {
 	.remove                 = altera_remove,
 };
 
+struct altera_platdata {
+	struct uio_info uioinfo[2];
+};
+
+static const char altera_in_name[] = "altera_fifo_in_irq";
+static const char altera_out_name[] = "altera_fifo_out_irq";
+static const char altera_poll_name[] = "altera_fifo";
+
+static irqreturn_t altera_handler(int irq, struct uio_info *dev_info)
+{
+	void __iomem *csr_base = dev_info->mem[0].internal_addr;
+	u32 ien;
+
+	ien = ioread32(csr_base + FIFO_IENABLE_REG);
+	if (ien & (1 << 6))
+		/* Poorly documented "enable all" flag */
+		ien = FIFO_IENABLE_ALL;
+	if (!(ioread32(csr_base + FIFO_EVENT_REG) & ien))
+		return IRQ_NONE;
+
+	/* Disable interrupt */
+	iowrite32(0, csr_base + FIFO_IENABLE_REG);
+	return IRQ_HANDLED;
+}
+
 static int altera_probe(struct platform_device *pdev)
 {
+	struct altera_platdata *priv;
+	struct uio_info *uioinfo_in, *uioinfo_out;
+	struct uio_info uioinfo_poll;
+	const struct resource *in_csr, *out_csr, *in_irq, *out_irq, *anon_irq;
 	struct property *prop;
 	u32 i;
+	int ret;
 
+	if (strcmp(pdev->name, "ff270000.fifo"))
+		return -ENODEV;
 	printk(KERN_DEBUG "altera_probe: "
 			"name %s\n", pdev->name);
 	printk(KERN_DEBUG "altera_probe: "
@@ -84,16 +119,64 @@ static int altera_probe(struct platform_device *pdev)
 		printk(KERN_DEBUG "altera_probe: resource "
 				"end %08x\n", pdev->resource[i].end);
 		printk(KERN_DEBUG "altera_probe: resource "
-				"name %p\n", pdev->resource[i].name);
+				"name %s\n", pdev->resource[i].name);
+		printk(KERN_DEBUG "altera_probe: resource "
+				"flags %lx\n", pdev->resource[i].flags);
 	}
-	return -ENODEV;
+
+	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv) {
+		dev_err(&pdev->dev, "unable to kmalloc\n");
+		return -ENOMEM;
+	}
+	in_csr = &pdev->resource[1];
+	in_irq = &pdev->resource[2];
+	uioinfo_in = &priv->uioinfo[0];
+	uioinfo_in->name = altera_in_name;
+	uioinfo_in->version = altera_version;
+	uioinfo_in->mem[0].name = in_csr->name;
+	uioinfo_in->mem[0].memtype = UIO_MEM_PHYS;
+	uioinfo_in->mem[0].addr = in_csr->start;
+	uioinfo_in->mem[0].size = resource_size(in_csr);
+	uioinfo_in->mem[0].internal_addr = ioremap(uioinfo_in->mem[0].addr,
+			uioinfo_in->mem[0].size);
+	if (!uioinfo_in->mem[0].internal_addr) {
+		dev_err(&pdev->dev, "failed to map registers\n");
+		return -ENODEV;
+	}
+	uioinfo_in->mem[1].name = pdev->resource[0].name;
+	uioinfo_in->mem[1].memtype = UIO_MEM_PHYS;
+	uioinfo_in->mem[1].addr = pdev->resource[0].start;
+	uioinfo_in->mem[1].size = resource_size(&pdev->resource[0]);
+	if ((ret = platform_get_irq(pdev, 0)) < 0) {
+		dev_err(&pdev->dev, "failed to get IRQ\n");
+		return ret;
+	}
+	uioinfo_in->irq = ret;
+	uioinfo_in->irq_flags = IRQF_SHARED;
+	uioinfo_in->handler = altera_handler;
+	if ((ret = uio_register_device(&pdev->dev, uioinfo_in))) {
+			dev_err(&pdev->dev, "unable to register uio "
+					"device\n");
+		return ret;
+	}
+
+	platform_set_drvdata(pdev, priv);
+	return 0;
 }
 
 static int altera_remove(struct platform_device *pdev)
 {
+	struct altera_platdata *priv = platform_get_drvdata(pdev);
+	uio_unregister_device(&priv->uioinfo[0]);
+	iounmap(priv->uioinfo[0].mem[0].internal_addr);
+
 	return 0;
 }
 
+module_platform_driver(altera_driver);
+
+#if 0
 static int __init altera_init(void)
 {
 	int rc;
@@ -104,24 +187,6 @@ static int __init altera_init(void)
 		return -ENODEV;
 	}
 	return 0;
-}
-
-#if 0
-static irqreturn_t avalon_handler(int irq, struct uio_info *dev_info)
-{
-	void __iomem *csr_base = dev_info->mem[1].internal_addr;
-	u32 ien;
-
-	ien = ioread32(csr_base + FIFO_IENABLE_REG);
-	if (ien & (1 << 6))
-		/* Poorly documented "enable all" flag */
-		ien = FIFO_IENABLE_ALL;
-	if (!(ioread32(csr_base + FIFO_EVENT_REG) & ien))
-		return IRQ_NONE;
-
-	/* Disable interrupt */
-	iowrite32(0, csr_base + FIFO_IENABLE_REG);
-	return IRQ_HANDLED;
 }
 
 static int __init avalon_init(void)
@@ -177,7 +242,6 @@ out_free:
 	kfree (info);
 	return -ENODEV;
 }
-#endif
 
 static void __exit altera_exit(void)
 {
@@ -189,7 +253,4 @@ static void __exit altera_exit(void)
 #endif
 	platform_driver_unregister(&altera_driver);
 }
-
-MODULE_DEVICE_TABLE(of, altera_of_ids);
-module_init(altera_init);
-module_exit(altera_exit);
+#endif
