@@ -1,10 +1,13 @@
 #include <linux/device.h>
+#include <linux/err.h>
+#include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/uio_driver.h>
 
 #include <asm/io.h>
@@ -63,8 +66,7 @@ static const char altera_poll_name[] = "altera_fifo_no_irq";
 
 static irqreturn_t altera_handler(int irq, struct uio_info *dev_info)
 {
-	void __iomem *csr_base = dev_info->mem[0].internal_addr +
-			dev_info->mem[0].offs;
+	void __iomem *csr_base = dev_info->mem[0].internal_addr;
 	u32 ien;
 
 	ien = ioread32(csr_base + FIFO_IENABLE_REG);
@@ -79,32 +81,27 @@ static irqreturn_t altera_handler(int irq, struct uio_info *dev_info)
 	return IRQ_HANDLED;
 }
 
+enum altera_mode {
+	MODE_IN_IRQ,
+	MODE_OUT_IRQ,
+	MODE_POLLED
+};
+
+struct probe_ctx {
+	const struct platform_device *pdev;
+	enum altera_mode mode;
+	struct uio_info uio_irq, uio_poll;
+	size_t irq_mem;
+	size_t poll_mem;
+	const struct resource *csr;
+};
+
 static resource_size_t align_resource_size(const struct resource *r) {
 	return PAGE_ALIGN(r->end - (r->start & PAGE_MASK) + 1);
 }
 
-static void add_csr(struct platform_device *pdev, struct uio_info *info,
-		const struct resource *r)
-{
-	if (info->mem[0].size) {
-		dev_warn(&pdev->dev, "multiple CSRs; falling back to "
-				"polling");
-		info->name = NULL;
-		return;
-	}
-	if (!strcmp(r->name, "in_csr"))
-		info->name = altera_in_name;
-	else
-		info->name = altera_out_name;
-	info->mem[0].memtype = UIO_MEM_PHYS;
-	info->mem[0].addr = r->start & PAGE_MASK;
-	info->mem[0].offs = r->start & ~PAGE_MASK;
-	info->mem[0].size = align_resource_size(r);
-	info->mem[0].name = r->name;
-}
-
-static int add_region(struct platform_device *pdev, struct uio_info *info,
-		size_t *mem, const struct resource *r)
+static int add_uio_region(const struct platform_device *pdev,
+		struct uio_info *info, size_t *mem, const struct resource *r)
 {
 	if (*mem >= MAX_UIO_MAPS) {
 		dev_err(&pdev->dev, "too many memory regions");
@@ -119,21 +116,92 @@ static int add_region(struct platform_device *pdev, struct uio_info *info,
 	return 0;
 }
 
+static int add_mem(struct probe_ctx *ctx, const struct resource *r)
+{
+	if (!strcmp(r->name, "in_csr") ||
+			!strcmp(r->name, "out_csr")) {
+		if (ctx->csr != NULL) {
+			dev_warn(&ctx->pdev->dev, "multiple CSRs; falling "
+					"back to polling");
+			ctx->mode = MODE_POLLED;
+		}
+		ctx->csr = r;
+		if (!strcmp(r->name, "in_csr"))
+			ctx->mode = MODE_IN_IRQ;
+		else
+			ctx->mode = MODE_OUT_IRQ;
+		ctx->uio_irq.mem[0].memtype = UIO_MEM_PHYS;
+		ctx->uio_irq.mem[0].addr = r->start & PAGE_MASK;
+		ctx->uio_irq.mem[0].offs = r->start & ~PAGE_MASK;
+		ctx->uio_irq.mem[0].size = align_resource_size(r);
+		ctx->uio_irq.mem[0].name = r->name;
+		if (add_uio_region(ctx->pdev, &ctx->uio_poll, &ctx->poll_mem, r))
+			return -1;
+	} else if (add_uio_region(ctx->pdev, &ctx->uio_irq, &ctx->irq_mem, r)
+			|| add_uio_region(ctx->pdev, &ctx->uio_poll,
+				&ctx->poll_mem, r)) {
+		return -1;
+	}
+	return 0;
+}
+
+static char *make_name(struct platform_device *pdev, const char *suffix)
+{
+	const char *base_name;
+	int should_sanitize;
+	char *c, *ret;
+	size_t len_b, len_t;
+	const struct device_node *of_node = pdev->dev.of_node;
+
+	if (!of_node) {
+		base_name = "altera_fifo";
+		should_sanitize = 0;
+	} else {
+		base_name = of_node->full_name;
+		should_sanitize = 1;
+	}
+	if (should_sanitize) {
+		if (*base_name == '/')
+			base_name++;
+	}
+	len_b = strlen(base_name);
+	len_t = len_b + strlen(suffix) + 1;
+	ret = devm_kmalloc(&pdev->dev, len_t, GFP_KERNEL);
+	if (!ret) {
+		dev_err(&pdev->dev, "unable to kmalloc\n");
+		return ERR_PTR(-ENOMEM);
+	}
+	strcpy(ret, base_name);
+	strcpy(ret + len_b, suffix);
+	if (should_sanitize) {
+		for (c = ret; *c != '\0'; c++) {
+			if (*c == '/')
+				*c = ' ';
+		}
+	}
+	return ret;
+}
+
 static int altera_probe(struct platform_device *pdev)
 {
-	struct uio_info uio_irq, uio_poll;
+	struct probe_ctx ctx;
 	struct uio_info *uio_final;
-	size_t irq_mem = 1;
-	size_t poll_mem = 0;
+	int nr_irqs;
+	char *suffix;
 	u32 i;
-	int ret, nr_irqs;
+	int ret;
 
-	memset(&uio_irq, 0, sizeof(uio_irq));
-	memset(&uio_poll, 0, sizeof(uio_poll));
-	uio_irq.version = altera_version;
-	uio_poll.name = altera_poll_name;
-	uio_poll.version = altera_version;
-	uio_final = devm_kzalloc(&pdev->dev, sizeof(*uio_final), GFP_KERNEL);
+	ctx.pdev = pdev;
+	ctx.mode = MODE_POLLED;
+	ctx.irq_mem = 1;
+	ctx.poll_mem = 0;
+	ctx.csr = NULL;
+	memset(&ctx.uio_irq, 0, sizeof(ctx.uio_irq));
+	memset(&ctx.uio_poll, 0, sizeof(ctx.uio_poll));
+	ctx.uio_irq.version = altera_version;
+	ctx.uio_poll.version = altera_version;
+
+	uio_final = devm_kmalloc(&pdev->dev, sizeof(*uio_final), GFP_KERNEL);
 	if (!uio_final) {
 		dev_err(&pdev->dev, "unable to kmalloc\n");
 		return -ENOMEM;
@@ -144,68 +212,66 @@ static int altera_probe(struct platform_device *pdev)
 
 		if (r->flags != IORESOURCE_MEM)
 			continue;
-		if (!strcmp(r->name, "in_csr") ||
-				!strcmp(r->name, "out_csr")) {
-			add_csr(pdev, &uio_irq, r);
-			if (add_region(pdev, &uio_poll, &poll_mem, r))
-				return -ENODEV;
-		} else if (add_region(pdev, &uio_irq, &irq_mem, r) ||
-				add_region(pdev, &uio_poll, &poll_mem, r)) {
-				return -ENODEV;
-		}
+		if (add_mem(&ctx, r))
+			return -ENODEV;
 	}
 
 	nr_irqs = platform_irq_count(pdev);
 	if (nr_irqs > 1) {
 		dev_warn(&pdev->dev, "multiple interrupt lines; falling "
 				"back to polling");
-		uio_irq.name = NULL;
+		ctx.mode = MODE_POLLED;
 	} else if (nr_irqs < 1) {
-		uio_irq.name = NULL;
+		ctx.mode = MODE_POLLED;
 	}
-	if (uio_irq.name != NULL) {
+	if (ctx.mode != MODE_POLLED) {
 		ret = platform_get_irq(pdev, 0);
 		if (ret < 0) {
 			dev_warn(&pdev->dev, "failed to get IRQ; falling "
 					"back to polling");
-			uio_irq.name = NULL;
+			ctx.mode = MODE_POLLED;
 		} else {
-			uio_irq.irq = ret;
+			ctx.uio_irq.irq = ret;
 		}
 	}
-	if (uio_irq.name != NULL) {
-		uio_irq.irq_flags = IRQF_SHARED;
-		uio_irq.handler = altera_handler;
-		uio_irq.mem[0].internal_addr = ioremap(
-				uio_irq.mem[0].addr,
-				uio_irq.mem[0].size);
-		if (!uio_irq.mem[0].internal_addr) {
+	if (ctx.mode != MODE_POLLED) {
+		ctx.uio_irq.irq_flags = IRQF_SHARED;
+		ctx.uio_irq.handler = altera_handler;
+		ctx.uio_irq.mem[0].internal_addr = devm_ioremap(
+				&pdev->dev,
+				ctx.csr->start,
+				resource_size(ctx.csr));
+		if (!ctx.uio_irq.mem[0].internal_addr) {
 			dev_err(&pdev->dev, "failed to map registers\n");
 			return -ENODEV;
 		}
-		memcpy(uio_final, &uio_irq, sizeof(uio_irq));
+		if (ctx.mode == MODE_IN_IRQ) {
+			suffix = " in_irq";
+		} else {
+			suffix = " out_irq";
+		}
+		memcpy(uio_final, &ctx.uio_irq, sizeof(ctx.uio_irq));
 	} else {
-		memcpy(uio_final, &uio_poll, sizeof(uio_poll));
+		suffix = " no_irq";
+		memcpy(uio_final, &ctx.uio_poll, sizeof(ctx.uio_poll));
 	}
+	uio_final->name = make_name(pdev, suffix);
+	if (IS_ERR(uio_final->name))
+		return PTR_ERR(uio_final->name);
 
 	if ((ret = uio_register_device(&pdev->dev, uio_final))) {
 		dev_err(&pdev->dev, "unable to register uio device\n");
-		goto out_unmap;
+		return ret;
 	}
 
 	platform_set_drvdata(pdev, uio_final);
 	return 0;
-out_unmap:
-	if (uio_final->mem[0].internal_addr)
-		iounmap(uio_final->mem[0].internal_addr);
-	return ret;
 }
 
 static int altera_remove(struct platform_device *pdev)
 {
 	struct uio_info *info = platform_get_drvdata(pdev);
 	uio_unregister_device(info);
-	iounmap(info->mem[0].internal_addr);
 	return 0;
 }
 
