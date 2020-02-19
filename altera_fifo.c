@@ -1,5 +1,6 @@
 #include <linux/device.h>
 #include <linux/ioport.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -56,17 +57,14 @@ static struct platform_driver altera_driver = {
 	.remove                 = altera_remove,
 };
 
-struct altera_platdata {
-	struct uio_info uioinfo[2];
-};
-
 static const char altera_in_name[] = "altera_fifo_in_irq";
 static const char altera_out_name[] = "altera_fifo_out_irq";
-static const char altera_poll_name[] = "altera_fifo";
+static const char altera_poll_name[] = "altera_fifo_no_irq";
 
 static irqreturn_t altera_handler(int irq, struct uio_info *dev_info)
 {
-	void __iomem *csr_base = dev_info->mem[0].internal_addr;
+	void __iomem *csr_base = dev_info->mem[0].internal_addr +
+			dev_info->mem[0].offs;
 	u32 ien;
 
 	ien = ioread32(csr_base + FIFO_IENABLE_REG);
@@ -81,18 +79,56 @@ static irqreturn_t altera_handler(int irq, struct uio_info *dev_info)
 	return IRQ_HANDLED;
 }
 
+static resource_size_t align_resource_size(const struct resource *r) {
+	return PAGE_ALIGN(r->end - (r->start & PAGE_MASK) + 1);
+}
+
+static void add_csr(struct platform_device *pdev, struct uio_info *info,
+		const struct resource *r)
+{
+	if (info->mem[0].size) {
+		dev_warn(&pdev->dev, "multiple CSRs; falling back to "
+				"polling");
+		info->name = NULL;
+		return;
+	}
+	if (!strcmp(r->name, "in_csr"))
+		info->name = altera_in_name;
+	else
+		info->name = altera_out_name;
+	info->mem[0].memtype = UIO_MEM_PHYS;
+	info->mem[0].addr = r->start & PAGE_MASK;
+	info->mem[0].offs = r->start & ~PAGE_MASK;
+	info->mem[0].size = align_resource_size(r);
+	info->mem[0].name = r->name;
+}
+
+static int add_region(struct platform_device *pdev, struct uio_info *info,
+		size_t *mem, const struct resource *r)
+{
+	if (*mem >= MAX_UIO_MAPS) {
+		dev_err(&pdev->dev, "too many memory regions");
+		return -1;
+	}
+	info->mem[*mem].memtype = UIO_MEM_PHYS;
+	info->mem[*mem].addr = r->start & PAGE_MASK;
+	info->mem[*mem].offs = r->start & ~PAGE_MASK;
+	info->mem[*mem].size = align_resource_size(r);
+	info->mem[*mem].name = r->name;
+	(*mem)++;
+	return 0;
+}
+
 static int altera_probe(struct platform_device *pdev)
 {
-	struct altera_platdata *priv;
-	struct uio_info *uioinfo_in, *uioinfo_out;
-	struct uio_info uioinfo_poll;
-	const struct resource *in_csr, *out_csr, *in_irq, *out_irq, *anon_irq;
+	struct uio_info uio_irq, uio_poll;
+	struct uio_info *uio_final;
+	size_t irq_mem = 1;
+	size_t poll_mem = 0;
 	struct property *prop;
 	u32 i;
-	int ret;
+	int ret, nr_irqs;
 
-	if (strcmp(pdev->name, "ff270000.fifo"))
-		return -ENODEV;
 	printk(KERN_DEBUG "altera_probe: "
 			"name %s\n", pdev->name);
 	printk(KERN_DEBUG "altera_probe: "
@@ -124,133 +160,85 @@ static int altera_probe(struct platform_device *pdev)
 				"flags %lx\n", pdev->resource[i].flags);
 	}
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
-	if (!priv) {
+	memset(&uio_irq, 0, sizeof(uio_irq));
+	memset(&uio_poll, 0, sizeof(uio_poll));
+	uio_irq.version = altera_version;
+	uio_poll.name = altera_poll_name;
+	uio_poll.version = altera_version;
+	uio_final = devm_kzalloc(&pdev->dev, sizeof(*uio_final), GFP_KERNEL);
+	if (!uio_final) {
 		dev_err(&pdev->dev, "unable to kmalloc\n");
 		return -ENOMEM;
 	}
-	in_csr = &pdev->resource[1];
-	in_irq = &pdev->resource[2];
-	uioinfo_in = &priv->uioinfo[0];
-	uioinfo_in->name = altera_in_name;
-	uioinfo_in->version = altera_version;
-	uioinfo_in->mem[0].name = in_csr->name;
-	uioinfo_in->mem[0].memtype = UIO_MEM_PHYS;
-	uioinfo_in->mem[0].addr = in_csr->start;
-	uioinfo_in->mem[0].size = resource_size(in_csr);
-	uioinfo_in->mem[0].internal_addr = ioremap(uioinfo_in->mem[0].addr,
-			uioinfo_in->mem[0].size);
-	if (!uioinfo_in->mem[0].internal_addr) {
-		dev_err(&pdev->dev, "failed to map registers\n");
-		return -ENODEV;
-	}
-	uioinfo_in->mem[1].name = pdev->resource[0].name;
-	uioinfo_in->mem[1].memtype = UIO_MEM_PHYS;
-	uioinfo_in->mem[1].addr = pdev->resource[0].start;
-	uioinfo_in->mem[1].size = resource_size(&pdev->resource[0]);
-	if ((ret = platform_get_irq(pdev, 0)) < 0) {
-		dev_err(&pdev->dev, "failed to get IRQ\n");
-		return ret;
-	}
-	uioinfo_in->irq = ret;
-	uioinfo_in->irq_flags = IRQF_SHARED;
-	uioinfo_in->handler = altera_handler;
-	if ((ret = uio_register_device(&pdev->dev, uioinfo_in))) {
-			dev_err(&pdev->dev, "unable to register uio "
-					"device\n");
-		return ret;
+
+	for (i = 0; i < pdev->num_resources; i++) {
+		const struct resource *r = &pdev->resource[i];
+
+		if (r->flags != IORESOURCE_MEM)
+			continue;
+		if (!strcmp(r->name, "in_csr") ||
+				!strcmp(r->name, "out_csr")) {
+			add_csr(pdev, &uio_irq, r);
+			if (add_region(pdev, &uio_poll, &poll_mem, r))
+				return -ENODEV;
+		} else if (add_region(pdev, &uio_irq, &irq_mem, r) ||
+				add_region(pdev, &uio_poll, &poll_mem, r)) {
+				return -ENODEV;
+		}
 	}
 
-	platform_set_drvdata(pdev, priv);
+	nr_irqs = platform_irq_count(pdev);
+	if (nr_irqs > 1) {
+		dev_warn(&pdev->dev, "multiple interrupt lines; falling "
+				"back to polling");
+		uio_irq.name = NULL;
+	} else if (nr_irqs < 1) {
+		uio_irq.name = NULL;
+	}
+	if (uio_irq.name != NULL) {
+		ret = platform_get_irq(pdev, 0);
+		if (ret < 0) {
+			dev_warn(&pdev->dev, "failed to get IRQ; falling "
+					"back to polling");
+			uio_irq.name = NULL;
+		} else {
+			uio_irq.irq = ret;
+		}
+	}
+	if (uio_irq.name != NULL) {
+		uio_irq.irq_flags = IRQF_SHARED;
+		uio_irq.handler = altera_handler;
+		uio_irq.mem[0].internal_addr = ioremap(
+				uio_irq.mem[0].addr,
+				uio_irq.mem[0].size);
+		if (!uio_irq.mem[0].internal_addr) {
+			dev_err(&pdev->dev, "failed to map registers\n");
+			return -ENODEV;
+		}
+		memcpy(uio_final, &uio_irq, sizeof(uio_irq));
+	} else {
+		memcpy(uio_final, &uio_poll, sizeof(uio_poll));
+	}
+
+	if ((ret = uio_register_device(&pdev->dev, uio_final))) {
+		dev_err(&pdev->dev, "unable to register uio device\n");
+		goto out_unmap;
+	}
+
+	platform_set_drvdata(pdev, uio_final);
 	return 0;
+out_unmap:
+	if (uio_final->mem[0].internal_addr)
+		iounmap(uio_final->mem[0].internal_addr);
+	return ret;
 }
 
 static int altera_remove(struct platform_device *pdev)
 {
-	struct altera_platdata *priv = platform_get_drvdata(pdev);
-	uio_unregister_device(&priv->uioinfo[0]);
-	iounmap(priv->uioinfo[0].mem[0].internal_addr);
-
+	struct uio_info *info = platform_get_drvdata(pdev);
+	uio_unregister_device(info);
+	iounmap(info->mem[0].internal_addr);
 	return 0;
 }
 
 module_platform_driver(altera_driver);
-
-#if 0
-static int __init altera_init(void)
-{
-	int rc;
-
-	if ((rc = platform_driver_register(&altera_driver))) {
-		printk(KERN_ERR "altera_fifo: platform_driver_register "
-				"returned %d", rc);
-		return -ENODEV;
-	}
-	return 0;
-}
-
-static int __init avalon_init(void)
-{
-	struct uio_info *info;
-
-	info = kzalloc(sizeof(struct uio_info), GFP_KERNEL);
-	if (!info)
-		return -ENOMEM;
-
-	info->name = "avalon_fifo_fifo_f2h_in";
-	info->version = "0.1";
-	info->mem[0].name = "out";
-	info->mem[0].memtype = UIO_MEM_PHYS;
-	/* Hardcoded ALT_LWFPGASLVS_OFST and HW_REGS_MASK */
-	info->mem[0].addr = 0xff200000 +
-			(FIFO_F2H_OUT_OUT_BASE & 0x03ffffff);
-	info->mem[0].size = FIFO_F2H_OUT_OUT_SPAN;
-	info->mem[0].internal_addr = ioremap(info->mem[0].addr,
-			info->mem[0].size);
-	if (!info->mem[0].internal_addr) {
-		printk(KERN_ERR "ioremap0 failed.\n");
-		goto out_free;
-	}
-	info->mem[1].name = "in_csr";
-	info->mem[1].memtype = UIO_MEM_PHYS;
-	/* Hardcoded ALT_LWFPGASLVS_OFST and HW_REGS_MASK */
-	info->mem[1].addr = 0xff200000 +
-			(FIFO_F2H_OUT_IN_CSR_BASE & 0x03ffffff);
-	info->mem[1].size = FIFO_F2H_OUT_IN_CSR_SPAN;
-	info->mem[1].internal_addr = ioremap(info->mem[1].addr,
-			info->mem[1].size);
-	if (!info->mem[1].internal_addr) {
-		printk(KERN_ERR "ioremap1 failed.\n");
-		goto out_unmap0;
-	}
-	info->irq = FIFO_F2H_OUT_IN_CSR_IRQ;
-	info->irq_flags = IRQF_SHARED;
-	info->handler = avalon_handler;
-
-	/* FIXME: Parent device can't be NULL */
-	if (uio_register_device(NULL, info)) {
-		printk(KERN_ERR "uio_register failed.\n");
-		goto out_unmap1;
-	}
-
-	return 0;
-out_unmap1:
-	iounmap(info->mem[1].internal_addr);
-out_unmap0:
-	iounmap(info->mem[0].internal_addr);
-out_free:
-	kfree (info);
-	return -ENODEV;
-}
-
-static void __exit altera_exit(void)
-{
-#if 0
-	uio_unregister_device(info);
-	iounmap(info->mem[1].internal_addr);
-	iounmap(info->mem[0].internal_addr);
-	kfree (info);
-#endif
-	platform_driver_unregister(&altera_driver);
-}
-#endif
