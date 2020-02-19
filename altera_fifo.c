@@ -125,40 +125,8 @@ static int altera_probe(struct platform_device *pdev)
 	struct uio_info *uio_final;
 	size_t irq_mem = 1;
 	size_t poll_mem = 0;
-	struct property *prop;
 	u32 i;
 	int ret, nr_irqs;
-
-	printk(KERN_DEBUG "altera_probe: "
-			"name %s\n", pdev->name);
-	printk(KERN_DEBUG "altera_probe: "
-			"id %u\n", pdev->id);
-	printk(KERN_DEBUG "altera_probe: device "
-			"init_name %s\n", pdev->dev.init_name);
-	printk(KERN_DEBUG "altera_probe: device "
-			"platform_data %p\n", pdev->dev.platform_data);
-	printk(KERN_DEBUG "altera_probe: device of_node "
-			"name %s\n", pdev->dev.of_node->name);
-	printk(KERN_DEBUG "altera_probe: device of_node "
-			"type %s\n", pdev->dev.of_node->type);
-	printk(KERN_DEBUG "altera_probe: device of_node "
-			"full_name %s\n", pdev->dev.of_node->full_name);
-	for (prop = pdev->dev.of_node->properties; prop != NULL;
-			prop = prop->next)
-		printk(KERN_DEBUG "altera_probe: device of_node properties "
-				"name %s\n", prop->name);
-	printk(KERN_DEBUG "altera_probe: "
-			"num_resources %u\n", pdev->num_resources);
-	for (i = 0; i < pdev->num_resources; i++) {
-		printk(KERN_DEBUG "altera_probe: resource "
-				"start %08x\n", pdev->resource[i].start);
-		printk(KERN_DEBUG "altera_probe: resource "
-				"end %08x\n", pdev->resource[i].end);
-		printk(KERN_DEBUG "altera_probe: resource "
-				"name %s\n", pdev->resource[i].name);
-		printk(KERN_DEBUG "altera_probe: resource "
-				"flags %lx\n", pdev->resource[i].flags);
-	}
 
 	memset(&uio_irq, 0, sizeof(uio_irq));
 	memset(&uio_poll, 0, sizeof(uio_poll));
