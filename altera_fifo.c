@@ -60,10 +60,6 @@ static struct platform_driver altera_driver = {
 	.remove                 = altera_remove,
 };
 
-static const char altera_in_name[] = "altera_fifo_in_irq";
-static const char altera_out_name[] = "altera_fifo_out_irq";
-static const char altera_poll_name[] = "altera_fifo_no_irq";
-
 static irqreturn_t altera_handler(int irq, struct uio_info *dev_info)
 {
 	void __iomem *csr_base = dev_info->mem[0].internal_addr;
@@ -145,49 +141,11 @@ static int add_mem(struct probe_ctx *ctx, const struct resource *r)
 	return 0;
 }
 
-static char *make_name(struct platform_device *pdev, const char *suffix)
-{
-	const char *base_name;
-	int should_sanitize;
-	char *c, *ret;
-	size_t len_b, len_t;
-	const struct device_node *of_node = pdev->dev.of_node;
-
-	if (!of_node) {
-		base_name = "altera_fifo";
-		should_sanitize = 0;
-	} else {
-		base_name = of_node->full_name;
-		should_sanitize = 1;
-	}
-	if (should_sanitize) {
-		if (*base_name == '/')
-			base_name++;
-	}
-	len_b = strlen(base_name);
-	len_t = len_b + strlen(suffix) + 1;
-	ret = devm_kmalloc(&pdev->dev, len_t, GFP_KERNEL);
-	if (!ret) {
-		dev_err(&pdev->dev, "unable to kmalloc\n");
-		return ERR_PTR(-ENOMEM);
-	}
-	strcpy(ret, base_name);
-	strcpy(ret + len_b, suffix);
-	if (should_sanitize) {
-		for (c = ret; *c != '\0'; c++) {
-			if (*c == '/')
-				*c = ' ';
-		}
-	}
-	return ret;
-}
-
 static int altera_probe(struct platform_device *pdev)
 {
 	struct probe_ctx ctx;
 	struct uio_info *uio_final;
 	int nr_irqs;
-	char *suffix;
 	u32 i;
 	int ret;
 
@@ -245,20 +203,15 @@ static int altera_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "failed to map registers\n");
 			return -ENODEV;
 		}
-		if (ctx.mode == MODE_IN_IRQ) {
-			suffix = " in_irq";
-		} else {
-			suffix = " out_irq";
-		}
 		memcpy(uio_final, &ctx.uio_irq, sizeof(ctx.uio_irq));
+		if (ctx.mode == MODE_IN_IRQ)
+			uio_final->name = "altera_fifo_in_irq";
+		else
+			uio_final->name = "altera_fifo_out_irq";
 	} else {
-		suffix = " no_irq";
 		memcpy(uio_final, &ctx.uio_poll, sizeof(ctx.uio_poll));
+		uio_final->name = "altera_fifo_no_irq";
 	}
-	uio_final->name = make_name(pdev, suffix);
-	if (IS_ERR(uio_final->name))
-		return PTR_ERR(uio_final->name);
-
 	if ((ret = uio_register_device(&pdev->dev, uio_final))) {
 		dev_err(&pdev->dev, "unable to register uio device\n");
 		return ret;
