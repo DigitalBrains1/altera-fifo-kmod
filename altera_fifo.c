@@ -63,13 +63,9 @@ static struct platform_driver altera_driver = {
 static irqreturn_t altera_handler(int irq, struct uio_info *dev_info)
 {
 	void __iomem *csr_base = dev_info->mem[0].internal_addr;
-	u32 ien;
 
-	ien = ioread32(csr_base + FIFO_IENABLE_REG);
-	if (ien & (1 << 6))
-		/* Poorly documented "enable all" flag */
-		ien = FIFO_IENABLE_ALL;
-	if (!(ioread32(csr_base + FIFO_EVENT_REG) & ien))
+	if (!(ioread32(csr_base + FIFO_EVENT_REG) &
+				ioread32(csr_base + FIFO_IENABLE_REG)))
 		return IRQ_NONE;
 
 	/* Disable interrupt */
