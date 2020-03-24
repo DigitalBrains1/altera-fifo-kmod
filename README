@@ -1,0 +1,71 @@
+This is a Linux kernel driver for accessing an Intel FPGA Avalon FIFO Memory
+Core. It is a minimal driver: using the kernel's userspace I/O (UIO)
+subsystem, only the interrupt is caught in kernelspace. Userspace can block or
+select() on these interrupts and do the actual handling.
+
+For a general introduction to the UIO subsystem, please read the documentation
+included in the kernel source code (Documentation/driver-api/uio-howto.rst as
+of this writing).
+
+Since most of the actual work is done in userspace, more documentation on the
+proper use of this driver, and an example of it, can be found in the following
+project:
+
+XXX INCLUDE LINK to packet_fifo project
+
+This driver binds to the devicetree. The Intel Platform Designer (QSys) tool
+that is part of Intel Quartus can generate the relevant parts for you, as
+explained in the packet_fifo project. Entries look like this:
+
+fifo_f2h_out: fifo@0x000002000 {
+	compatible = "altr,fifo-18.1", "altr,fifo-1.0";
+	reg = <0x00000000 0x00002020 0x00000008>,
+		<0x00000000 0x00002000 0x00000020>;
+	reg-names = "out", "in_csr";
+	interrupt-parent = <&intc>;
+	interrupts = <0 43 4>;
+};
+
+fifo_h2f_in: fifo@0x000001000 {
+	compatible = "altr,fifo-18.1", "altr,fifo-1.0";
+	reg = <0x00000000 0x00001000 0x00000008>;
+};
+
+It should be noted that it is impossible to determine the number of interrupt
+lines from the "interrupts" property alone; fifo_f2h_out actually has a single
+interrupt. Further details are available in the Devicetree Specification.
+
+This driver binds to devicetree nodes that declare a compatible property of
+"ALTR,fifo-1.0" (deprecated) or "altr,fifo-1.0". It will expose all registers
+as UIO memory regions. The memory region name should be used to determine
+which is which (but see below for a single anonymous region). Do not rely on
+the registers being in any particular order.
+
+Interrupts are tied to status registers. FIFO Memory Cores that operate in a
+single clock domain expose a single status register called "in_csr". FIFOs
+in dual-clock mode might have separate status registers for the input clock
+domain and the output clock domain.
+
+This driver supports both polled and interrupt modes. In polled mode, the
+driver is merely a convenient way to locate and access the MMIO registers. If
+the driver cannot determine the mapping between interrupt and status register,
+it will log a warning and fall back to polled mode.
+
+The driver exposes its mode to userspace through the UIO device name: it is
+one of "altera_fifo_in_irq", "altera_fifo_out_irq" or "altera_fifo_no_irq".
+
+The devicetree node as produced by Intel Quartus is not unambiguous. It does
+not indicate which CSR (status register) the interrupt line is tied to. The
+kernel driver uses the CSR to determine whether the FIFO was the source of the
+interrupt (for shared interrupts) and mask further interrupts until userspace
+has handled the current one. This means the proper mapping is relevant not
+only to userspace but also to this kernel driver.
+
+To resolve the ambiguity, the driver only supports a single interrupt line,
+and will analyze the names of the registers in the devicetree to find the
+correct CSR. If there are multiple CSRs in the register set, it will fall back
+to polled mode. Otherwise, the name of the UIO device reflects the CSR that
+should control the interrupt line.
+
+An UIO device with a name of "altera_fifo_in_irq" means the controlling CSR is
+named "in_csr". "altera_fifo_out_irq" means the CSR is named "out_csr".
