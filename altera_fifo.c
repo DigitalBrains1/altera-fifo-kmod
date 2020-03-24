@@ -116,18 +116,19 @@ static int add_mem(struct probe_ctx *ctx, const struct resource *r)
 			dev_warn(&ctx->pdev->dev, "multiple CSRs; falling "
 					"back to polling");
 			ctx->mode = MODE_POLLED;
+		} else if (!strcmp(r->name, "in_csr")) {
+			ctx->mode = MODE_IN_IRQ;
+		} else {
+			ctx->mode = MODE_OUT_IRQ;
 		}
 		ctx->csr = r;
-		if (!strcmp(r->name, "in_csr"))
-			ctx->mode = MODE_IN_IRQ;
-		else
-			ctx->mode = MODE_OUT_IRQ;
 		ctx->uio_irq.mem[0].memtype = UIO_MEM_PHYS;
 		ctx->uio_irq.mem[0].addr = r->start & PAGE_MASK;
 		ctx->uio_irq.mem[0].offs = r->start & ~PAGE_MASK;
 		ctx->uio_irq.mem[0].size = align_resource_size(r);
 		ctx->uio_irq.mem[0].name = r->name;
-		if (add_uio_region(ctx->pdev, &ctx->uio_poll, &ctx->poll_mem, r))
+		if (add_uio_region(ctx->pdev, &ctx->uio_poll, &ctx->poll_mem,
+				r))
 			return -1;
 	} else if (add_uio_region(ctx->pdev, &ctx->uio_irq, &ctx->irq_mem, r)
 			|| add_uio_region(ctx->pdev, &ctx->uio_poll,
