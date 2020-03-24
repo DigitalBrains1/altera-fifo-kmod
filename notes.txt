@@ -1,5 +1,0 @@
-drivers/of/address.c:
-	int of_address_to_resource(struct device_node *dev, int index,
-				   struct resource *r)
-drivers/of/irq.c:
-	int of_irq_to_resource(struct device_node *dev, int index, struct resource *r)

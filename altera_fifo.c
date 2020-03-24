@@ -1,3 +1,21 @@
+/*
+ * UIO driver for Intel FPGA Avalon FIFO Memory Core.
+ *
+ * (C) Copyright 2020 QBayLogic B.V.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/io.h>
@@ -43,7 +61,7 @@ static int altera_probe(struct platform_device *pdev);
 static int altera_remove(struct platform_device *pdev);
 
 static const struct of_device_id altera_of_ids[] = {
-	{ .compatible = "ALTR,fifo-1.0" },
+	{ .compatible = "ALTR,fifo-1.0" }, /* DEPRECATED */
 	{ .compatible = "altr,fifo-1.0" },
 	{ }
 };
