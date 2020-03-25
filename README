@@ -13,6 +13,24 @@ project:
 
 XXX INCLUDE LINK to packet_fifo project
 
+========
+BUILDING
+========
+
+Build a Linux kernel with CONFIG_UIO enabled (module or built-in).
+
+Edit the Makefile in this project to have KERNEL_HEADERS point at the kernel
+headers for the built kernel (the directory where you built it will do fine).
+
+Invoking `make` in this project is all that is needed to build a kernel module
+called altera_fifo.ko that can be loaded with `insmod`. The Makefile will use
+`rsync` to upload the new module to the development board. Adjust it to your
+situation or remove it.
+
+=====
+USING
+=====
+
 This driver binds to the devicetree. The Intel Platform Designer (QSys) tool
 that is part of Intel Quartus can generate the relevant parts for you, as
 explained in the packet_fifo project. Entries look like this:
