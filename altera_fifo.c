@@ -51,7 +51,7 @@
 #define FIFO_IENABLE_UDF  (0x20)
 #define FIFO_IENABLE_ALL  (0x3F)
 
-static const char altera_version[] = "0.1";
+static const char altera_version[] = "1.0";
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("QBayLogic B.V.");
 MODULE_DESCRIPTION("Platform driver for an Altera Avalon FIFO.");
