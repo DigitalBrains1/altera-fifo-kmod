@@ -98,3 +98,12 @@ should control the interrupt line.
 
 An UIO device with a name of "altera_fifo_in_irq" means the controlling CSR
 is named "in_csr". "altera_fifo_out_irq" means the CSR is named "out_csr".
+
+A single anonymous memory region
+--------------------------------
+
+If the devicetree node only has a single register region, it might be unnamed.
+The Linux kernel does give it a name, and the name is the full path to the
+devicetree node having the register. This full path is exposed in sysfs as the
+OF_FULLNAME entry in the device's uevent file. So the OF_FULLNAME from uevent
+will be the same string as the UIO device's single memory region.
